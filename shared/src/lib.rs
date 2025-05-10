@@ -1,6 +1,6 @@
 pub const PKEY: &'static str = "PKEY";
 pub const SKEY: &'static str = "SKEY";
-// async fn example() {
-//     let config = aws_config::load_from_env().await;
-//     let client = aws_sdk_dynamodb::Client::new(&config);
-// }
+
+pub fn matchmaking_pkey(turn_number: u32) -> String {
+    format!("matchmaking_turn_{}", turn_number)
+}
