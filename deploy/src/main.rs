@@ -5,7 +5,8 @@ const INLINE_POLICY: &'static str = r#"
     "Version": "2012-10-17",
     "Statement": [
         {"Effect": "Allow", "Action": "dynamodb:*", "Resource": "resource_arn_here"},
-        {"Effect": "Allow", "Action": "lambda:InvokeFunction", "Resource": "arn:aws:lambda:::function:mygamething"}
+        {"Effect": "Allow", "Action": "lambda:InvokeFunction", "Resource": "arn:aws:lambda:::function:mygamething"},
+        {"Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], "Resource": "*"}
     ]
 }"#;
 
