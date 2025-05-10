@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["deploy", "logic", "shared"]
+members = ["deploy", "logic", "server", "shared"]
 
 [workspace.dependencies]
 # at the time of writing these are private. you wont be able to build so just comment them out
@@ -15,3 +15,4 @@ aws-config = "1.6.2"
 aws-sdk-dynamodb = "1.74.0"
 tokio = { version = "1.0", features = ["full"] }
 fastrand = "2.3.0"
+lambda_runtime = "0.13.0"
