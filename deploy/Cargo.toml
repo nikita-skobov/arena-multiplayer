@@ -1,0 +1,9 @@
+[package]
+name = "deploy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ensko_aws = { workspace = true }
+ensko = { workspace = true }
+shared = { path = "../shared" }
