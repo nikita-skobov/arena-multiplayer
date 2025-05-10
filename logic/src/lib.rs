@@ -12,6 +12,7 @@ pub enum MatchResult {
     Matched(MatchmakingSkey, MatchmakingSkey),
 }
 
+#[derive(Debug)]
 pub enum MatchmakingResult {
     Matched(MatchmakingSkey),
     /// if Some(string) => there was an unknown error causing us to fake simulate
@@ -111,6 +112,20 @@ pub async fn end_turn(
     Ok(skey)
 }
 
+pub async fn delete_item(
+    ddb_client: &Client,
+    table_name: &str,
+    pkey: &str,
+    skey: &str,
+) -> Result<(), String> {
+    ddb_client.delete_item()
+        .table_name(table_name)
+        .key(PKEY, AttributeValue::S(pkey.to_string()))
+        .key(SKEY, AttributeValue::S(skey.to_string()))
+        .send().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub async fn attempt_match(
     ddb_client: &Client,
     table_name: &str,
@@ -169,14 +184,17 @@ pub async fn attempt_match(
     }
 }
 
-pub async fn attempt_matchmaking(
-    ddb_client: &Client,
-    table_name: &str,
+pub async fn attempt_matchmaking<'a, Fut>(
+    ddb_client: &'a Client,
+    table_name: &'a str,
     player1: AsyncMatchmakingRequest,
-) -> Result<MatchmakingResult, String> {
-    let mut available_opponents = list_matchmaking_entries(ddb_client, table_name, player1.turn_number).await?;
+    list_matchmaking_fn: fn(&'a Client, &'a str, u32) -> Fut,
+) -> Result<MatchmakingResult, String>
+    where Fut: Future<Output = Result<Vec<MatchmakingSkey>, String>>,
+{
+    let mut available_opponents = list_matchmaking_fn(ddb_client, table_name, player1.turn_number).await?;
     // prevent matching against self!
-    available_opponents.retain(|x| x.run_id != player1.skey.run_id);
+    available_opponents.retain(|x| x.run_id != player1.skey.run_id || x.random_component != player1.skey.random_component);
 
     let AsyncMatchmakingRequest { turn_number, skey } = player1;
     for op in available_opponents {
@@ -212,6 +230,26 @@ mod test {
 
     const TC_TABLE: &'static str = "mygametable2025";
 
+    /// a test version of `end_turn`.
+    /// the test version uses a deterministic value for the random_component
+    pub async fn end_turn_test(
+        ddb_client: &Client,
+        table_name: &str,
+        turn_number: u32,
+        run_id: String,
+    ) -> Result<MatchmakingSkey, String> {
+        let mut skey = MatchmakingSkey::new(run_id.clone());
+        skey.random_component = run_id;
+        ddb_client.put_item()
+            .table_name(table_name)
+            .item(PKEY, AttributeValue::S(shared::matchmaking_pkey(turn_number)))
+            .item(SKEY, AttributeValue::S(skey.format()))
+            // this is unlikely to happen as we have a random component, but just in case:
+            .condition_expression(format!("attribute_not_exists({PKEY})"))
+            .send().await.map_err(|e| format!("Failed to end turn: {:?}", e))?;
+        Ok(skey)
+    }
+
     macro_rules! tc {
         ($name:ident; |$c:ident| { $($x:tt)*}) => {
             #[test]
@@ -221,12 +259,12 @@ mod test {
                     let client = get_client().await;
                     let $c = &client;
                     $($x)*
-                });                
+                });
             }
         };
     }
 
-    tc!(matchmaking_happy_path_works; |c| {
+    tc!(match_happy_path_works; |c| {
         let player1 = end_turn(c, TC_TABLE, 1, "a".to_string()).await.expect("failed to end turn");
         let player2 = end_turn(c, TC_TABLE, 1, "b".to_string()).await.expect("failed to end turn");
         let res = attempt_match(c, TC_TABLE, 1, player1, player2).await;
@@ -239,7 +277,7 @@ mod test {
         }
     });
 
-    tc!(matchmaking_can_report_if_p2_already_matched; |c| {
+    tc!(match_can_report_if_p2_already_matched; |c| {
         let player1 = end_turn(c, TC_TABLE, 1, "a".to_string()).await.expect("failed to end turn");
         // player2 doesnt exist in the table. we should get a player2 condition error if we try to matchmake:
         let player2 = MatchmakingSkey::new("b".to_string());
@@ -250,7 +288,7 @@ mod test {
         }
     });
 
-    tc!(matchmaking_can_report_if_p1_already_matched; |c| {
+    tc!(match_can_report_if_p1_already_matched; |c| {
         // player1 doesnt exist in the table. we should get a player1 condition error if we try to matchmake:
         let player1 = MatchmakingSkey::new("a".to_string());
         let player2 = end_turn(c, TC_TABLE, 1, "b".to_string()).await.expect("failed to end turn");
@@ -261,7 +299,7 @@ mod test {
         }
     });
 
-    tc!(matchmaking_can_report_unknown_errors; |c| {
+    tc!(match_can_report_unknown_errors; |c| {
         // the table doesnt exist, so we should get an unexpected error
         let player1 = MatchmakingSkey::new("a".to_string());
         let player2 = MatchmakingSkey::new("a".to_string());
@@ -271,6 +309,149 @@ mod test {
                 assert!(e.contains("ResourceNotFoundException"), "{:?}", e);
             }
             e => panic!("Unexpected result: {:?}", e),
+        }
+    });
+
+    tc!(matchmaking_happy_path; |c| {
+        let player1 = end_turn(c, TC_TABLE, 3, "a".to_string()).await.expect("failed to end turn");
+        let player2 = end_turn(c, TC_TABLE, 3, "b".to_string()).await.expect("failed to end turn");
+        let player1 = AsyncMatchmakingRequest { turn_number: 3, skey: player1 };
+        let res = attempt_matchmaking(c, TC_TABLE, player1, list_matchmaking_entries).await.expect("should succeed");
+        match res {
+            MatchmakingResult::Matched(opponent) => {
+                assert_eq!(opponent.random_component, player2.random_component);
+                assert_eq!(opponent.run_id, player2.run_id);
+            }
+            e => panic!("unexpected matchmakingresult: {:?}", e),
+        }
+    });
+
+    tc!(matchmaking_can_be_dropped_if_p1_already_matched; |c| {
+        let player1 = end_turn(c, TC_TABLE, 4, "a".to_string()).await.expect("failed to end turn");
+        let _ = end_turn(c, TC_TABLE, 4, "b".to_string()).await.expect("failed to end turn");
+        let player1 = AsyncMatchmakingRequest { turn_number: 4, skey: player1 };
+        static mut P1_SKEY: String = String::new();
+        unsafe {
+            P1_SKEY = player1.skey.format();
+        }
+        pub async fn list_matchmaking_cb<'a>(
+            ddb_client: &'a Client,
+            table_name: &str,
+            turn_number: u32
+        ) -> Result<Vec<MatchmakingSkey>, String> {
+            let out = list_matchmaking_entries(ddb_client, table_name, turn_number).await;
+            // we will return the full list of opponents, but first we remove
+            // the player1's item to imply that player1 has already been matched with someone
+            #[allow(static_mut_refs)]
+            let p1_skey = unsafe { P1_SKEY.clone() };
+            delete_item(ddb_client, table_name, &shared::matchmaking_pkey(4), p1_skey.as_str()).await.expect("failed to delete item for test case");
+            out
+        }
+        let res = attempt_matchmaking(c, TC_TABLE, player1, list_matchmaking_cb).await.expect("should succeed");
+        match res {
+            MatchmakingResult::CanDrop => {}
+            e => panic!("unexpected matchmakingresult: {:?}", e),
+        }
+    });
+
+    tc!(matchmaking_can_fake_simulation_if_no_opponents; |c| {
+        // destroy past items first, we want this test to simulate a state where
+        // there are no other items except for player1
+        let items = list_matchmaking_entries(c, TC_TABLE, 999).await.expect("failed to list entries for deletion");
+        for item in items {
+            delete_item(c, TC_TABLE, &shared::matchmaking_pkey(999), &item.format()).await.expect("failed to delete item");
+        }
+
+        let player1 = end_turn(c, TC_TABLE, 999, "a".to_string()).await.expect("failed to end turn");
+        let player1 = AsyncMatchmakingRequest { turn_number: 999, skey: player1 };
+        let res = attempt_matchmaking(c, TC_TABLE, player1, list_matchmaking_entries).await.expect("should succeed");
+        match res {
+            MatchmakingResult::FakeSimulate(x) => {
+                // there should be no error since we are here due
+                // to there being no opponents, not due to an unexpected error
+                assert!(x.is_none());
+            }
+            e => panic!("unexpected matchmakingresult: {:?}", e),
+        }
+    });
+
+    tc!(matchmaking_can_fake_simulation_in_case_of_error; |c| {
+        pub async fn list_matchmaking_cb<'a>(
+            ddb_client: &'a Client,
+            _table_name: &str,
+            turn_number: u32
+        ) -> Result<Vec<MatchmakingSkey>, String> {
+            let out = list_matchmaking_entries(ddb_client, TC_TABLE, turn_number).await;
+            out
+        }
+        let _ = end_turn(c, TC_TABLE, 6, "b".to_string()).await.expect("failed to end turn");
+        let player1 = end_turn(c, TC_TABLE, 6, "a".to_string()).await.expect("failed to end turn");
+        let player1 = AsyncMatchmakingRequest { turn_number: 6, skey: player1 };
+        let res = attempt_matchmaking(c, "fake-table-that-doesnt-exist", player1, list_matchmaking_cb).await.expect("should succeed");
+        match res {
+            MatchmakingResult::FakeSimulate(x) => {
+                // there should be an error since we had an unexpected error when
+                // attempting a match for player1 and player2
+                assert!(x.is_some());
+            }
+            e => panic!("unexpected matchmakingresult: {:?}", e),
+        }
+    });
+
+    tc!(matchmaking_attempts_opponents_in_order; |c| {
+        // destroy past items first, we want this test to simulate a state where
+        // there are no other items except for player1
+        let items = list_matchmaking_entries(c, TC_TABLE, 7).await.expect("failed to list entries for deletion");
+        for item in items {
+            delete_item(c, TC_TABLE, &shared::matchmaking_pkey(7), &item.format()).await.expect("failed to delete item");
+        }
+
+        static mut P2_SKEY: String = String::new();
+        static mut P3_SKEY: String = String::new();
+        static mut P4_SKEY: String = String::new();
+        pub async fn list_matchmaking_cb<'a>(
+            ddb_client: &'a Client,
+            table_name: &str,
+            turn_number: u32
+        ) -> Result<Vec<MatchmakingSkey>, String> {
+            let out = list_matchmaking_entries(ddb_client, table_name, turn_number).await;
+            #[allow(static_mut_refs)]
+            unsafe {
+                // ensure the results are in order. v[0] should be p1
+                if let Ok(v) = &out {
+                    assert_eq!(v[1].format(), P2_SKEY);
+                    assert_eq!(v[2].format(), P3_SKEY);
+                    assert_eq!(v[3].format(), P4_SKEY);
+
+                    for i in 1..=2 {
+                        // delete entry for P2, P3, such that we match only with P4
+                        let _ = delete_item(ddb_client, table_name, &shared::matchmaking_pkey(7), &v[i].format()).await;
+                    }
+                }
+            }
+            out
+        }
+        let player4 = end_turn_test(c, TC_TABLE, 7, "d".to_string()).await.expect("failed to end turn");
+        let player3 = end_turn_test(c, TC_TABLE, 7, "c".to_string()).await.expect("failed to end turn");
+        let player2 = end_turn_test(c, TC_TABLE, 7, "b".to_string()).await.expect("failed to end turn");
+        let player1 = end_turn_test(c, TC_TABLE, 7, "a".to_string()).await.expect("failed to end turn");
+        let player1 = AsyncMatchmakingRequest { turn_number: 7, skey: player1 };
+
+        unsafe {
+            P2_SKEY = player2.format();
+            P3_SKEY = player3.format();
+            P4_SKEY = player4.format();
+        }
+
+        let res = attempt_matchmaking(c, TC_TABLE, player1, list_matchmaking_cb).await.expect("should succeed");
+        match res {
+            MatchmakingResult::Matched(x) => {
+                // we should match with player 4 (d)
+                // because player2 and player3 were matched between the time we made the query
+                // and the time we attempted to match them
+                assert_eq!(x.run_id, "d");
+            }
+            e => panic!("unexpected matchmakingresult: {:?}", e),
         }
     });
 }
