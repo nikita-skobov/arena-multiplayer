@@ -1,0 +1,1 @@
+this binary package depends on crate `ensko` and `ensko_aws` to manage infrastructure for this project. these crates are not public, so you wont be able to run this as-is, but you can examine the code in `deploy/src/main.rs` to see what resources are needed and with what arguments.
